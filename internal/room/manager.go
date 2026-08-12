@@ -28,6 +28,7 @@ type Manager struct {
 	// matches comfortnoise.NewGenerator. Override via SetComfortNoiseEnabled
 	// (wired from COMFORT_NOISE_ENABLED) before Create.
 	comfortNoiseEnabled bool
+	liveQueueDepth      int
 
 	// hookMu guards onLegPanicTeardown alone — never take it and m.mu together,
 	// and never call the hook under either.
@@ -68,6 +69,7 @@ func NewManager(legMgr *leg.Manager, bus *events.Bus, log *slog.Logger) *Manager
 		bus:                 bus,
 		log:                 log,
 		comfortNoiseEnabled: true,
+		liveQueueDepth:      mixer.DefaultLiveQueueDepth,
 	}
 }
 
@@ -79,11 +81,24 @@ func (m *Manager) SetComfortNoiseEnabled(enabled bool) {
 	m.comfortNoiseEnabled = enabled
 }
 
+// SetLiveQueueDepth sets AddParticipant channel depth for rooms created
+// after this call. Values < 1 are ignored.
+func (m *Manager) SetLiveQueueDepth(n int) {
+	if n < 1 {
+		return
+	}
+	m.mu.Lock()
+	m.liveQueueDepth = n
+	m.mu.Unlock()
+}
+
 func (m *Manager) applyRoomDefaults(r *Room) {
 	m.mu.RLock()
 	enabled := m.comfortNoiseEnabled
+	depth := m.liveQueueDepth
 	m.mu.RUnlock()
 	r.mix.SetComfortNoise(enabled)
+	r.mix.SetLiveQueueDepth(depth)
 }
 
 func (m *Manager) Create(id, appID string, sampleRate int) (*Room, error) {

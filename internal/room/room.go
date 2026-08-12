@@ -42,7 +42,6 @@ func NewRoom(id, appID string, sampleRate int, log *slog.Logger) *Room {
 	if sampleRate == 0 {
 		sampleRate = mixer.DefaultSampleRate
 	}
-	mix := mixer.New(log, sampleRate)
 	return &Room{
 		ID:           id,
 		AppID:        appID,
@@ -50,7 +49,7 @@ func NewRoom(id, appID string, sampleRate int, log *slog.Logger) *Room {
 		participants: make(map[string]leg.Leg),
 		legParts:     make(map[string]*mixer.Participant),
 		legStreams:   make(map[string]*legStream),
-		mix:          mix,
+		mix:          mixer.New(log, sampleRate),
 		log:          log,
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/VoiceBlender/voiceblender/internal/agent"
 	"github.com/VoiceBlender/voiceblender/internal/events"
@@ -16,21 +17,19 @@ import (
 	"github.com/google/uuid"
 )
 
-// streamBuffer accepts variable-sized writes and provides blocking reads.
-// ElevenLabs TTS delivers audio in bursts (faster than real-time). The
-// mixer's readLoop drains this Reader into Participant.incoming; a deep
-// incoming queue (see mixer.AddParticipant) absorbs the burst while
-// mixTick is the sole 20 ms clock. Do not Sleep-pace here — a second
-// clock phase-skews against the mixer and invents underruns.
+// streamBuffer accepts variable-sized writes. pace > 0 Sleeps between reads
+// (historical); pace == 0 blocks and relies on MIXER_LIVE_QUEUE_DEPTH.
 type streamBuffer struct {
-	mu     sync.Mutex
-	cond   *sync.Cond
-	buf    []byte
-	closed bool
+	mu       sync.Mutex
+	cond     *sync.Cond
+	buf      []byte
+	closed   bool
+	lastRead time.Time
+	pace     time.Duration
 }
 
-func newStreamBuffer() *streamBuffer {
-	sb := &streamBuffer{}
+func newStreamBuffer(pace time.Duration) *streamBuffer {
+	sb := &streamBuffer{pace: pace}
 	sb.cond = sync.NewCond(&sb.mu)
 	return sb
 }
@@ -51,6 +50,12 @@ func (sb *streamBuffer) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	if sb.pace > 0 && !sb.lastRead.IsZero() {
+		wait := sb.pace - time.Since(sb.lastRead)
+		if wait > 0 {
+			time.Sleep(wait)
+		}
+	}
 
 	sb.mu.Lock()
 	for len(sb.buf) < len(p) && !sb.closed {
@@ -61,10 +66,12 @@ func (sb *streamBuffer) Read(p []byte) (int, error) {
 		return 0, io.EOF
 	}
 	n := copy(p, sb.buf)
-	// Compact: shift remaining data to front to avoid unbounded growth.
 	remaining := copy(sb.buf, sb.buf[n:])
 	sb.buf = sb.buf[:remaining]
 	sb.mu.Unlock()
+	if sb.pace > 0 {
+		sb.lastRead = time.Now()
+	}
 	return n, nil
 }
 
@@ -73,6 +80,13 @@ func (sb *streamBuffer) Close() {
 	sb.closed = true
 	sb.cond.Broadcast()
 	sb.mu.Unlock()
+}
+
+func (s *Server) agentSpeakPace() time.Duration {
+	if s.Config.MixerSoleClock {
+		return 0
+	}
+	return time.Duration(mixer.Ptime) * time.Millisecond
 }
 
 type agentInfo struct {
@@ -324,7 +338,7 @@ func (s *Server) doStartLegAgent(legID, provider, apiKey string, opts agent.Opti
 		rm.Mixer().SetParticipantTap(id, tapPW)
 
 		sourceID := "agent-" + uuid.New().String()[:8]
-		sb := newStreamBuffer()
+		sb := newStreamBuffer(s.agentSpeakPace())
 		rm.Mixer().AddPlaybackSource(sourceID, sb)
 
 		roomRate := rm.Mixer().SampleRate()
@@ -342,7 +356,7 @@ func (s *Server) doStartLegAgent(legID, provider, apiKey string, opts agent.Opti
 		}
 		audioIn = mixer.NewResampleReader(ar, l.SampleRate(), mixer.DefaultSampleRate)
 
-		sb := newStreamBuffer()
+		sb := newStreamBuffer(s.agentSpeakPace())
 		audioOut = mixer.NewResampleWriter(sb, mixer.DefaultSampleRate, l.SampleRate())
 		info.speakBuf = sb
 
@@ -654,7 +668,7 @@ func (s *Server) doStartRoomAgent(roomID, provider, apiKey string, opts agent.Op
 	roomAgents.Unlock()
 
 	sourceID := "agent-" + uuid.New().String()[:8]
-	sb := newStreamBuffer()
+	sb := newStreamBuffer(s.agentSpeakPace())
 	listenPR, listenPW := createPipe()
 	rm.Mixer().AddParticipant(sourceID, sb, listenPW)
 
