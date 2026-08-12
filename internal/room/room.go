@@ -42,6 +42,10 @@ func NewRoom(id, appID string, sampleRate int, log *slog.Logger) *Room {
 	if sampleRate == 0 {
 		sampleRate = mixer.DefaultSampleRate
 	}
+	mix := mixer.New(log, sampleRate)
+	// Quality A/B (mirko2): comfort noise under "silent" mixes adds hiss that
+	// MediaBridge does not. Disable until we decide CN is needed for PSTN.
+	mix.SetComfortNoise(false)
 	return &Room{
 		ID:           id,
 		AppID:        appID,
@@ -49,7 +53,7 @@ func NewRoom(id, appID string, sampleRate int, log *slog.Logger) *Room {
 		participants: make(map[string]leg.Leg),
 		legParts:     make(map[string]*mixer.Participant),
 		legStreams:   make(map[string]*legStream),
-		mix:          mixer.New(log, sampleRate),
+		mix:          mix,
 		log:          log,
 	}
 }
