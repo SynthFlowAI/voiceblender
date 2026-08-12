@@ -14,9 +14,9 @@ import (
 // When playoutBytes > 0 the buffer acts as a fixed-delay WS jitter /
 // playout buffer: Read returns silence until the target lead is buffered,
 // then releases one frame per pace tick. After warm-up, a brief underrun
-// returns silence immediately instead of blocking — that keeps the mixer
-// readLoop fed so mixTick does not splice an extra digital-zero gap on
-// clock-phase jitter between the WS producer and the room mixer.
+// replays the last good frame instead of digital zeros — that keeps the
+// mixer readLoop fed without splicing mid-word cracks when the WS producer
+// and room mixer clocks phase-skew.
 //
 // Adapted from internal/api/agent.go's streamBuffer with a fixed capacity
 // for drop-on-overflow semantics.
@@ -34,6 +34,9 @@ type streamBuffer struct {
 	// until a full Read is available, matching historical behaviour).
 	playoutBytes int
 	warming      bool
+	// lastFrame holds the most recent full Read payload so underruns can
+	// hold-last instead of inventing silence after warm-up.
+	lastFrame []byte
 }
 
 func newStreamBuffer(capBytes int, frameMs int) *streamBuffer {
@@ -81,8 +84,8 @@ func (sb *streamBuffer) Write(p []byte) (int, error) {
 // the mixer's readLoop sees at most one frame per pace interval.
 //
 // With playout enabled, Read never blocks past the pace wait after the
-// first call: warm-up and underrun return a silence frame of len(p) so the
-// mixer keeps a steady cadence.
+// first call: warm-up returns silence; post-warm underruns hold the last
+// good frame so the mixer does not see digital zeros.
 func (sb *streamBuffer) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
@@ -124,9 +127,12 @@ func (sb *streamBuffer) Read(p []byte) (int, error) {
 		sb.warming = false
 	}
 	if sb.warming || len(sb.buf) < len(p) {
-		// Leading silence while warming, or underrun after warm-up —
-		// do not block; keep mixer readLoop on cadence.
-		clear(p)
+		if !sb.warming && len(sb.lastFrame) == len(p) {
+			copy(p, sb.lastFrame)
+		} else {
+			// Leading silence while warming, or underrun before any frame.
+			clear(p)
+		}
 		sb.lastRead = time.Now()
 		return len(p), nil
 	}
@@ -134,6 +140,12 @@ func (sb *streamBuffer) Read(p []byte) (int, error) {
 	n := copy(p, sb.buf)
 	remaining := copy(sb.buf, sb.buf[n:])
 	sb.buf = sb.buf[:remaining]
+	if n == len(p) {
+		if len(sb.lastFrame) != len(p) {
+			sb.lastFrame = make([]byte, len(p))
+		}
+		copy(sb.lastFrame, p)
+	}
 	sb.lastRead = time.Now()
 	return n, nil
 }

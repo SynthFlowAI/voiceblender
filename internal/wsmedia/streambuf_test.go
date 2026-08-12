@@ -138,7 +138,7 @@ func TestStreamBufferPlayoutWarmsThenReleases(t *testing.T) {
 	}
 }
 
-func TestStreamBufferPlayoutUnderrunReturnsSilenceWithoutBlocking(t *testing.T) {
+func TestStreamBufferPlayoutUnderrunHoldsLastWithoutBlocking(t *testing.T) {
 	const frameBytes = 320
 	sb := newStreamBufferPlayout(4096, 20, frameBytes) // 20ms lead
 	frame := bytes.Repeat([]byte{0x44}, frameBytes)
@@ -159,8 +159,8 @@ func TestStreamBufferPlayoutUnderrunReturnsSilenceWithoutBlocking(t *testing.T) 
 	if err != nil || n != frameBytes {
 		t.Fatalf("underrun read: n=%d err=%v", n, err)
 	}
-	if !bytes.Equal(out, make([]byte, frameBytes)) {
-		t.Fatal("expected silence on underrun")
+	if !bytes.Equal(out, frame) {
+		t.Fatal("expected hold-last on underrun, not silence")
 	}
 	// Must not block waiting for producer data — only the pace sleep (~20ms).
 	if elapsed > 80*time.Millisecond {
