@@ -160,6 +160,7 @@ Configured server-wide:
 
 - `WS_JITTER_BUFFER_MS` — target playout lead in ms. `0` = disabled passthrough (default). `40`–`60` is typical for externally paced agent audio.
 - `WS_JITTER_BUFFER_MAX_MS` — queue cap in ms when enabled (default `300`).
+- `COMFORT_NOISE_ENABLED` — inject low-level comfort noise (~−75 dBFS) into silent mixer frames (default `true`). Set `false` for cleaner telephony / recording A/B against MediaBridge.
 
 WebRTC legs are unaffected — pion/webrtc provides its own jitter buffer.
 

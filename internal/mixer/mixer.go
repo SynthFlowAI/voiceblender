@@ -386,8 +386,10 @@ func (m *Mixer) AddParticipant(id string, reader io.Reader, writer io.Writer) *P
 		ID:       id,
 		Reader:   reader,
 		Writer:   gw,
-		incoming: make(chan []byte, 3),
-		outgoing: make(chan []byte, 3),
+		// Match playback depth so bursty WS/TTS producers (no streambuf
+		// Sleep pace) can lead the mixer without drop-oldest underruns.
+		incoming: make(chan []byte, 50),
+		outgoing: make(chan []byte, 50),
 		inject:   make(chan []byte, 3),
 		done:     make(chan struct{}),
 		guard:    gw,

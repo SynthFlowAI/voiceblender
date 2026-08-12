@@ -68,16 +68,16 @@ func TestStreamBufferCloseUnblocksRead(t *testing.T) {
 	}
 }
 
-func TestStreamBufferPacesReads(t *testing.T) {
+func TestStreamBufferDoesNotPaceReads(t *testing.T) {
+	// Mixer owns the 20 ms clock; streambuf must not Sleep between reads.
 	sb := newStreamBuffer(4096, 20)
 	frame := bytes.Repeat([]byte{1}, 100)
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if _, err := sb.Write(frame); err != nil {
 			t.Fatalf("write: %v", err)
 		}
 	}
 	out := make([]byte, 100)
-	// First read returns immediately; subsequent reads should be paced.
 	if _, err := sb.Read(out); err != nil {
 		t.Fatalf("read 1: %v", err)
 	}
@@ -86,8 +86,8 @@ func TestStreamBufferPacesReads(t *testing.T) {
 		t.Fatalf("read 2: %v", err)
 	}
 	elapsed := time.Since(start)
-	if elapsed < 15*time.Millisecond {
-		t.Fatalf("expected pacing ≥15ms, got %v", elapsed)
+	if elapsed >= 10*time.Millisecond {
+		t.Fatalf("unexpected pacing sleep: %v", elapsed)
 	}
 }
 
@@ -102,13 +102,19 @@ func TestStreamBufferPlayoutWarmsThenReleases(t *testing.T) {
 	frameC := bytes.Repeat([]byte{0x33}, frameBytes)
 
 	out := make([]byte, frameBytes)
-	// Not warm yet — first paced read must be silence and must not consume.
-	n, err := sb.Read(out)
-	if err != nil || n != frameBytes {
-		t.Fatalf("warm read: n=%d err=%v", n, err)
-	}
-	if !bytes.Equal(out, make([]byte, frameBytes)) {
-		t.Fatal("expected silence while warming")
+	started := make(chan struct{})
+	errC := make(chan error, 1)
+	go func() {
+		close(started)
+		_, err := sb.Read(out)
+		errC <- err
+	}()
+	<-started
+	time.Sleep(20 * time.Millisecond) // still warming — Read must block
+	select {
+	case err := <-errC:
+		t.Fatalf("warm Read returned early: %v", err)
+	default:
 	}
 
 	if _, err := sb.Write(frameA); err != nil {
@@ -117,10 +123,13 @@ func TestStreamBufferPlayoutWarmsThenReleases(t *testing.T) {
 	if _, err := sb.Write(frameB); err != nil {
 		t.Fatalf("write B: %v", err)
 	}
-	// Exactly at target — next read releases real audio.
-	n, err = sb.Read(out)
-	if err != nil || n != frameBytes {
-		t.Fatalf("post-warm read: n=%d err=%v", n, err)
+	select {
+	case err := <-errC:
+		if err != nil {
+			t.Fatalf("post-warm read: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("post-warm Read blocked")
 	}
 	if !bytes.Equal(out, frameA) {
 		t.Fatalf("want frame A after warm-up, got %x", out[:8])
@@ -129,7 +138,7 @@ func TestStreamBufferPlayoutWarmsThenReleases(t *testing.T) {
 	if _, err := sb.Write(frameC); err != nil {
 		t.Fatalf("write C: %v", err)
 	}
-	n, err = sb.Read(out)
+	n, err := sb.Read(out)
 	if err != nil || n != frameBytes {
 		t.Fatalf("read B: n=%d err=%v", n, err)
 	}
@@ -138,10 +147,11 @@ func TestStreamBufferPlayoutWarmsThenReleases(t *testing.T) {
 	}
 }
 
-func TestStreamBufferPlayoutUnderrunHoldsLastWithoutBlocking(t *testing.T) {
+func TestStreamBufferPlayoutUnderrunBlocksUntilData(t *testing.T) {
 	const frameBytes = 320
 	sb := newStreamBufferPlayout(4096, 20, frameBytes) // 20ms lead
 	frame := bytes.Repeat([]byte{0x44}, frameBytes)
+	next := bytes.Repeat([]byte{0x55}, frameBytes)
 	if _, err := sb.Write(frame); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -153,17 +163,29 @@ func TestStreamBufferPlayoutUnderrunHoldsLastWithoutBlocking(t *testing.T) {
 		t.Fatal("expected real frame after warm-up")
 	}
 
-	start := time.Now()
-	n, err := sb.Read(out)
-	elapsed := time.Since(start)
-	if err != nil || n != frameBytes {
-		t.Fatalf("underrun read: n=%d err=%v", n, err)
+	errC := make(chan error, 1)
+	go func() {
+		_, err := sb.Read(out)
+		errC <- err
+	}()
+	time.Sleep(30 * time.Millisecond)
+	select {
+	case err := <-errC:
+		t.Fatalf("underrun Read returned early (must block, not invent): %v", err)
+	default:
 	}
-	if !bytes.Equal(out, frame) {
-		t.Fatal("expected hold-last on underrun, not silence")
+	if _, err := sb.Write(next); err != nil {
+		t.Fatalf("write next: %v", err)
 	}
-	// Must not block waiting for producer data — only the pace sleep (~20ms).
-	if elapsed > 80*time.Millisecond {
-		t.Fatalf("underrun blocked too long: %v", elapsed)
+	select {
+	case err := <-errC:
+		if err != nil {
+			t.Fatalf("underrun read: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("underrun Read stayed blocked after write")
+	}
+	if !bytes.Equal(out, next) {
+		t.Fatal("expected next real frame after underrun wait")
 	}
 }

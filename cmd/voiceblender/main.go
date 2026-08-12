@@ -71,6 +71,8 @@ func main() {
 	// Leg and room managers
 	legMgr := leg.NewManager()
 	roomMgr := room.NewManager(legMgr, bus, log)
+	roomMgr.SetComfortNoiseEnabled(cfg.ComfortNoiseEnabled)
+	log.Info("comfort noise", "enabled", cfg.ComfortNoiseEnabled)
 
 	// Parse SIP port
 	sipPort, err := strconv.Atoi(cfg.SIPPort)

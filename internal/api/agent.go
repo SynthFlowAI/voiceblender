@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"sync"
-	"time"
 
 	"github.com/VoiceBlender/voiceblender/internal/agent"
 	"github.com/VoiceBlender/voiceblender/internal/events"
@@ -17,23 +16,21 @@ import (
 	"github.com/google/uuid"
 )
 
-// streamBuffer accepts variable-sized writes and provides paced reads.
-// ElevenLabs TTS delivers audio in bursts (faster than real-time), but
-// the mixer's readLoop drains its Reader as fast as possible into a tiny
-// 3-slot incoming channel, dropping overflow. The pacing here ensures
-// the readLoop gets at most one 640-byte frame per 20ms — matching the
-// mixer's tick rate — so no frames are dropped.
+// streamBuffer accepts variable-sized writes and provides blocking reads.
+// ElevenLabs TTS delivers audio in bursts (faster than real-time). The
+// mixer's readLoop drains this Reader into Participant.incoming; a deep
+// incoming queue (see mixer.AddParticipant) absorbs the burst while
+// mixTick is the sole 20 ms clock. Do not Sleep-pace here — a second
+// clock phase-skews against the mixer and invents underruns.
 type streamBuffer struct {
-	mu       sync.Mutex
-	cond     *sync.Cond
-	buf      []byte
-	closed   bool
-	lastRead time.Time
-	pace     time.Duration
+	mu     sync.Mutex
+	cond   *sync.Cond
+	buf    []byte
+	closed bool
 }
 
 func newStreamBuffer() *streamBuffer {
-	sb := &streamBuffer{pace: time.Duration(mixer.Ptime) * time.Millisecond}
+	sb := &streamBuffer{}
 	sb.cond = sync.NewCond(&sb.mu)
 	return sb
 }
@@ -54,14 +51,6 @@ func (sb *streamBuffer) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	// Pace: wait at least one frame interval between reads so the mixer's
-	// readLoop doesn't flood its tiny incoming channel.
-	if !sb.lastRead.IsZero() {
-		wait := sb.pace - time.Since(sb.lastRead)
-		if wait > 0 {
-			time.Sleep(wait)
-		}
-	}
 
 	sb.mu.Lock()
 	for len(sb.buf) < len(p) && !sb.closed {
@@ -76,8 +65,6 @@ func (sb *streamBuffer) Read(p []byte) (int, error) {
 	remaining := copy(sb.buf, sb.buf[n:])
 	sb.buf = sb.buf[:remaining]
 	sb.mu.Unlock()
-
-	sb.lastRead = time.Now()
 	return n, nil
 }
 
@@ -92,7 +79,7 @@ type agentInfo struct {
 	session  agent.Provider
 	sourceID string             // mixer playback source / participant ID
 	pipes    []*pipeWriter      // pipes to close on cleanup
-	speakBuf *streamBuffer      // paced speak buffer (closed before RemoveParticipant)
+	speakBuf *streamBuffer      // speak buffer (closed before RemoveParticipant)
 	roomID   string             // for leg agents: which room (if any)
 	cancel   context.CancelFunc // for room agents: dedicated context
 }

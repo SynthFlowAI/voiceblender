@@ -43,7 +43,6 @@ func NewRoom(id, appID string, sampleRate int, log *slog.Logger) *Room {
 		sampleRate = mixer.DefaultSampleRate
 	}
 	mix := mixer.New(log, sampleRate)
-	mix.SetComfortNoise(false)
 	return &Room{
 		ID:           id,
 		AppID:        appID,

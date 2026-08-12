@@ -68,6 +68,10 @@ type Config struct {
 	SIPJitterBufferMaxMs  int
 	WSJitterBufferMs      int
 	WSJitterBufferMaxMs   int
+	// ComfortNoiseEnabled injects low-level comfort noise into silent mixer
+	// frames (~−75 dBFS). Default true. Set false for cleaner telephony
+	// recordings / A/B against MediaBridge.
+	ComfortNoiseEnabled bool
 	// SIPSDPStrictMLineAnswer makes answers carry a port-0 placeholder for every
 	// offered m= section we do not accept, as RFC 3264 §6 requires. It is gated
 	// separately from multi-stream because it changes the SDP single-stream
@@ -202,6 +206,7 @@ func Load() Config {
 		SIPJitterBufferMaxMs:      envInt("SIP_JITTER_BUFFER_MAX_MS", 300),
 		WSJitterBufferMs:          envInt("WS_JITTER_BUFFER_MS", 0),
 		WSJitterBufferMaxMs:       envInt("WS_JITTER_BUFFER_MAX_MS", 300),
+		ComfortNoiseEnabled:       envBool("COMFORT_NOISE_ENABLED", true),
 		SIPSDPStrictMLineAnswer:   envBool("SIP_SDP_STRICT_MLINE_ANSWER", false),
 		SIPReferAutoDial:          os.Getenv("SIP_REFER_AUTO_DIAL") == "true",
 		SIPReferConsultTimeoutMs:  envInt("SIP_REFER_CONSULT_TIMEOUT_MS", 2000),

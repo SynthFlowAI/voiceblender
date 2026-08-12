@@ -3,40 +3,35 @@ package wsmedia
 import (
 	"io"
 	"sync"
-	"time"
 )
 
-// streamBuffer accepts variable-sized writes and provides paced reads. The
-// recv loop writes inbound PCM here; the mixer drains it at ptime cadence.
-// Capacity is bounded — writes that would exceed it discard the incoming
-// bytes and increment a drop counter so the recv loop can record the loss.
+// streamBuffer accepts variable-sized writes and provides blocking reads.
+// The recv loop writes inbound PCM here; the mixer readLoop drains it into
+// Participant.incoming. Capacity is bounded — writes that would exceed it
+// discard the incoming bytes and increment a drop counter so the recv loop
+// can record the loss.
 //
 // When playoutBytes > 0 the buffer acts as a fixed-delay WS jitter /
-// playout buffer: Read returns silence until the target lead is buffered,
-// then releases one frame per pace tick. After warm-up, a brief underrun
-// replays the last good frame instead of digital zeros — that keeps the
-// mixer readLoop fed without splicing mid-word cracks when the WS producer
-// and room mixer clocks phase-skew.
+// playout buffer: Read blocks until the target lead is buffered, then
+// returns frames as they become available. Empty after warm-up blocks
+// rather than inventing silence/hold — the room mixer is the sole 20 ms
+// clock (mixTick hold-last covers brief underruns). A second Sleep-based
+// pace here used to phase-skew against mixTick and splice mid-word zeros.
 //
 // Adapted from internal/api/agent.go's streamBuffer with a fixed capacity
 // for drop-on-overflow semantics.
 type streamBuffer struct {
-	mu       sync.Mutex
-	cond     *sync.Cond
-	buf      []byte
-	cap      int
-	dropped  int64
-	closed   bool
-	lastRead time.Time
-	pace     time.Duration
+	mu      sync.Mutex
+	cond    *sync.Cond
+	buf     []byte
+	cap     int
+	dropped int64
+	closed  bool
 
 	// playoutBytes is the warm-up / target lead (0 = passthrough: block
 	// until a full Read is available, matching historical behaviour).
 	playoutBytes int
 	warming      bool
-	// lastFrame holds the most recent full Read payload so underruns can
-	// hold-last instead of inventing silence after warm-up.
-	lastFrame []byte
 }
 
 func newStreamBuffer(capBytes int, frameMs int) *streamBuffer {
@@ -44,6 +39,7 @@ func newStreamBuffer(capBytes int, frameMs int) *streamBuffer {
 }
 
 func newStreamBufferPlayout(capBytes int, frameMs int, playoutBytes int) *streamBuffer {
+	_ = frameMs // retained for call-site compatibility; mixer owns pacing
 	if playoutBytes < 0 {
 		playoutBytes = 0
 	}
@@ -52,7 +48,6 @@ func newStreamBufferPlayout(capBytes int, frameMs int, playoutBytes int) *stream
 	}
 	sb := &streamBuffer{
 		cap:          capBytes,
-		pace:         time.Duration(frameMs) * time.Millisecond,
 		playoutBytes: playoutBytes,
 		warming:      playoutBytes > 0,
 	}
@@ -80,73 +75,43 @@ func (sb *streamBuffer) Write(p []byte) (int, error) {
 }
 
 // Read blocks until len(p) bytes are buffered or the buffer is closed.
-// Reads are paced: the second and later reads sleep up to pace - delta so
-// the mixer's readLoop sees at most one frame per pace interval.
-//
-// With playout enabled, Read never blocks past the pace wait after the
-// first call: warm-up returns silence; post-warm underruns hold the last
-// good frame so the mixer does not see digital zeros.
+// With playout enabled, the first successful read waits until the warm-up
+// lead is buffered; after that it behaves like passthrough. Never invents
+// silence or hold-last frames — that is the mixer's job.
 func (sb *streamBuffer) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
-	}
-	if !sb.lastRead.IsZero() {
-		wait := sb.pace - time.Since(sb.lastRead)
-		if wait > 0 {
-			time.Sleep(wait)
-		}
 	}
 
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
 
-	if sb.playoutBytes == 0 {
-		for len(sb.buf) < len(p) && !sb.closed {
+	if sb.playoutBytes > 0 && sb.warming {
+		for len(sb.buf) < sb.playoutBytes && !sb.closed {
 			sb.cond.Wait()
 		}
-		if len(sb.buf) == 0 && sb.closed {
+		if sb.closed && len(sb.buf) < sb.playoutBytes {
+			sb.buf = sb.buf[:0]
 			return 0, io.EOF
 		}
-		n := copy(p, sb.buf)
-		remaining := copy(sb.buf, sb.buf[n:])
-		sb.buf = sb.buf[:remaining]
-		sb.lastRead = time.Now()
-		return n, nil
-	}
-
-	// Playout / jitter-buffer mode.
-	if sb.closed && len(sb.buf) < len(p) {
-		if len(sb.buf) == 0 {
-			return 0, io.EOF
-		}
-		// Drop a trailing partial frame on close rather than blocking.
-		sb.buf = sb.buf[:0]
-		return 0, io.EOF
-	}
-	if sb.warming && len(sb.buf) >= sb.playoutBytes {
 		sb.warming = false
 	}
-	if sb.warming || len(sb.buf) < len(p) {
-		if !sb.warming && len(sb.lastFrame) == len(p) {
-			copy(p, sb.lastFrame)
-		} else {
-			// Leading silence while warming, or underrun before any frame.
-			clear(p)
-		}
-		sb.lastRead = time.Now()
-		return len(p), nil
+
+	for len(sb.buf) < len(p) && !sb.closed {
+		sb.cond.Wait()
+	}
+	if len(sb.buf) == 0 && sb.closed {
+		return 0, io.EOF
+	}
+	if sb.closed && len(sb.buf) < len(p) {
+		// Drop a trailing partial frame on close rather than returning a short read.
+		sb.buf = sb.buf[:0]
+		return 0, io.EOF
 	}
 
 	n := copy(p, sb.buf)
 	remaining := copy(sb.buf, sb.buf[n:])
 	sb.buf = sb.buf[:remaining]
-	if n == len(p) {
-		if len(sb.lastFrame) != len(p) {
-			sb.lastFrame = make([]byte, len(p))
-		}
-		copy(sb.lastFrame, p)
-	}
-	sb.lastRead = time.Now()
 	return n, nil
 }
 
